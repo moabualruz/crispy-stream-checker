@@ -22,4 +22,3 @@ jobs:
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-features
       - run: cargo package
-      - run: cargo publish --dry-run

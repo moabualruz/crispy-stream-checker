@@ -26,5 +26,3 @@ jobs:
         run: cargo doc --no-deps
       - name: cargo package
         run: cargo package
-      - name: cargo publish dry-run
-        run: cargo publish --dry-run
