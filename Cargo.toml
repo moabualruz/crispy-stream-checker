@@ -1,0 +1,31 @@
+[package]
+name = "crispy-stream-checker"
+description = "Concurrent IPTV stream validator"
+version = "0.1.1"
+edition = "2024"
+license = "CC-BY-NC-SA-4.0"
+repository = "https://github.com/moabualruz/crispy-stream-checker"
+homepage = "https://github.com/moabualruz/crispy-stream-checker"
+documentation = "https://docs.rs/crispy-stream-checker"
+readme = "README.md"
+keywords = ["iptv", "stream-checker", "validation", "probe", "playlist"]
+categories = ["multimedia", "network-programming", "command-line-utilities"]
+rust-version = "1.85"
+
+[dependencies]
+crispy-iptv-types = "0.1.1"
+crispy-media-probe = "0.1.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls-native-roots", "json", "gzip"] }
+chrono = { version = "0.4", features = ["serde"] }
+tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
+tracing = "0.1"
+sha2 = "0.10"
+url = "2"
+
+[dev-dependencies]
+wiremock = "0.6"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tempfile = "3"
