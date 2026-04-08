@@ -232,7 +232,7 @@ async fn progress_callback_called_for_each_url() {
         check_bulk_with_progress(&urls, &opts_for(&server), move |done, total, _result| {
             count_clone.fetch_add(1, Ordering::Relaxed);
             assert_eq!(total, 3);
-            assert!(done >= 1 && done <= 3);
+            assert!((1..=3).contains(&done));
         })
         .await;
 
