@@ -38,10 +38,6 @@ pub struct CheckOptions {
     pub backoff: BackoffStrategy,
     /// Maximum number of retry attempts (default: 6).
     pub retries: u32,
-    /// Proxy list for geoblock confirmation testing.
-    pub proxy_list: Option<Vec<String>>,
-    /// Whether to test geoblocked streams via proxies.
-    pub test_geoblock: bool,
     /// Minimum bytes for direct streams at depth 0 (default: 500 KB).
     pub min_bytes_direct: u64,
     /// Minimum bytes for nested/segment streams (default: 128 KB).
@@ -64,8 +60,6 @@ impl Default for CheckOptions {
             accept_invalid_certs: false,
             backoff: BackoffStrategy::default(),
             retries: 6,
-            proxy_list: None,
-            test_geoblock: false,
             min_bytes_direct: 512_000, // 500 KB
             min_bytes_nested: 131_072, // 128 KB
             skip_media_probe: false,
@@ -109,6 +103,8 @@ pub struct CheckResult {
     pub error_reason: Option<String>,
     /// Label mismatch warnings (e.g., "Expected 4K, got 1080p").
     pub mismatch_warnings: Vec<String>,
+    /// Screenshot path when capture was requested and succeeded.
+    pub screenshot_path: Option<String>,
 }
 
 /// Aggregated report from a bulk stream check.

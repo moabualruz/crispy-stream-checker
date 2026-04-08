@@ -1,9 +1,8 @@
 //! Core stream checking logic with bounded concurrency.
 
-use std::sync::Arc;
 use std::time::Instant;
 
-use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use tracing::{debug, warn};
 
 use crate::error::summarize_error;
@@ -79,6 +78,7 @@ pub async fn check_stream_named(url: &str, name: Option<&str>, opts: &CheckOptio
             category: StreamCategory::Dead,
             error_reason: Some(format!("invalid URL: {url}")),
             mismatch_warnings: Vec::new(),
+            screenshot_path: None,
         };
     }
 
@@ -100,6 +100,7 @@ pub async fn check_stream_named(url: &str, name: Option<&str>, opts: &CheckOptio
                 category: StreamCategory::Dead,
                 error_reason: Some(format!("failed to build HTTP client: {e}")),
                 mismatch_warnings: Vec::new(),
+                screenshot_path: None,
             };
         }
     };
@@ -175,6 +176,7 @@ pub async fn check_stream_named(url: &str, name: Option<&str>, opts: &CheckOptio
                             category: StreamCategory::Geoblocked,
                             error_reason: None,
                             mismatch_warnings: Vec::new(),
+                            screenshot_path: None,
                         };
                     }
                     StreamCategory::Dead => {
@@ -193,6 +195,7 @@ pub async fn check_stream_named(url: &str, name: Option<&str>, opts: &CheckOptio
                             category: StreamCategory::Dead,
                             error_reason: Some(format!("HTTP {status}")),
                             mismatch_warnings: Vec::new(),
+                            screenshot_path: None,
                         };
                     }
                     StreamCategory::Alive => {
@@ -220,12 +223,14 @@ pub async fn check_stream_named(url: &str, name: Option<&str>, opts: &CheckOptio
                                 category: StreamCategory::Dead,
                                 error_reason: Some("Insufficient data".to_string()),
                                 mismatch_warnings: Vec::new(),
+                                screenshot_path: None,
                             };
                         }
 
                         // Run media probe if enabled.
                         let (media_info, mismatch_warnings) =
                             run_media_probe_if_enabled(url, name, opts).await;
+                        let screenshot_path = capture_screenshot_if_enabled(url, name, opts).await;
 
                         return CheckResult {
                             url: url.to_string(),
@@ -242,6 +247,7 @@ pub async fn check_stream_named(url: &str, name: Option<&str>, opts: &CheckOptio
                             category: StreamCategory::Alive,
                             error_reason: None,
                             mismatch_warnings,
+                            screenshot_path,
                         };
                     }
                 }
@@ -278,6 +284,7 @@ pub async fn check_stream_named(url: &str, name: Option<&str>, opts: &CheckOptio
                     category: StreamCategory::Dead,
                     error_reason: Some(error_summary),
                     mismatch_warnings: Vec::new(),
+                    screenshot_path: None,
                 };
             }
         }
@@ -300,6 +307,7 @@ pub async fn check_stream_named(url: &str, name: Option<&str>, opts: &CheckOptio
         category: StreamCategory::Dead,
         error_reason: last_error_reason,
         mismatch_warnings: Vec::new(),
+        screenshot_path: None,
     }
 }
 
@@ -334,6 +342,28 @@ async fn run_media_probe_if_enabled(
             warn!(url, error = %e, "media probe failed, keeping stream as Alive");
             (None, Vec::new())
         }
+    }
+}
+
+async fn capture_screenshot_if_enabled(
+    url: &str,
+    name: Option<&str>,
+    opts: &CheckOptions,
+) -> Option<String> {
+    if opts.skip_screenshots {
+        return None;
+    }
+    let dir = opts.screenshot_dir.as_deref()?;
+    let label = name.unwrap_or("stream");
+    let safe_name = crispy_media_probe::sanitize_filename(label, 80);
+    let path = std::path::Path::new(dir).join(format!("{safe_name}.png"));
+    if crispy_media_probe::capture_screenshot(url, path.to_string_lossy().as_ref(), 10)
+        .await
+        .is_ok()
+    {
+        Some(path.to_string_lossy().to_string())
+    } else {
+        None
     }
 }
 
@@ -375,24 +405,17 @@ pub async fn check_bulk_with_progress(
         };
     }
 
-    let semaphore = Arc::new(Semaphore::new(opts.max_concurrent));
     let opts = opts.clone();
-
-    // Spawn all tasks, each acquiring a semaphore permit.
-    let mut handles = Vec::with_capacity(total);
-    for url in urls {
-        let sem = Arc::clone(&semaphore);
-        let url = url.clone();
+    let mut join_set = JoinSet::new();
+    let mut next_index = 0usize;
+    while next_index < total && join_set.len() < opts.max_concurrent {
+        let url = urls[next_index].clone();
         let task_opts = opts.clone();
-
-        let handle = tokio::spawn(async move {
-            let _permit = sem.acquire().await.expect("semaphore closed unexpectedly");
-            check_stream(&url, &task_opts).await
-        });
-        handles.push(handle);
+        let index = next_index;
+        join_set.spawn(async move { (index, check_stream(&url, &task_opts).await) });
+        next_index += 1;
     }
 
-    // Collect results in order, invoking progress callback.
     let mut results = Vec::with_capacity(total);
     let mut available = 0usize;
     let mut unavailable = 0usize;
@@ -402,8 +425,12 @@ pub async fn check_bulk_with_progress(
     let mut dead_results = Vec::new();
     let mut geoblocked_results = Vec::new();
 
-    for (i, handle) in handles.into_iter().enumerate() {
-        let result = handle.await.expect("stream check task panicked");
+    let mut ordered: Vec<Option<CheckResult>> = vec![None; total];
+    let mut completed = 0usize;
+
+    while let Some(joined) = join_set.join_next().await {
+        let (index, result) = joined.expect("stream check task panicked");
+        ordered[index] = Some(result.clone());
 
         match result.category {
             StreamCategory::Geoblocked => {
@@ -424,9 +451,19 @@ pub async fn check_bulk_with_progress(
             }
         }
 
-        on_progress(i + 1, total, &result);
-        results.push(result);
+        completed += 1;
+        on_progress(completed, total, &result);
+
+        if next_index < total {
+            let url = urls[next_index].clone();
+            let task_opts = opts.clone();
+            let index = next_index;
+            join_set.spawn(async move { (index, check_stream(&url, &task_opts).await) });
+            next_index += 1;
+        }
     }
+
+    results.extend(ordered.into_iter().flatten());
 
     BulkCheckReport {
         total,

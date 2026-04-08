@@ -35,6 +35,7 @@
 //! `threading.Event` for async notification.
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use tokio::sync::watch;
@@ -55,21 +56,30 @@ pub enum DeduplicateAction {
 /// same URL across concurrent tasks.
 pub struct UrlDeduplicator {
     inner: Mutex<DeduplicatorInner>,
+    max_results: usize,
 }
 
 struct DeduplicatorInner {
     results: HashMap<String, CheckResult>,
+    order: VecDeque<String>,
     pending: HashMap<String, watch::Sender<Option<CheckResult>>>,
 }
 
 impl UrlDeduplicator {
     /// Create a new empty deduplicator.
     pub fn new() -> Self {
+        Self::with_capacity(10_000)
+    }
+
+    /// Create a deduplicator with a bounded cache capacity.
+    pub fn with_capacity(max_results: usize) -> Self {
         Self {
             inner: Mutex::new(DeduplicatorInner {
                 results: HashMap::new(),
+                order: VecDeque::new(),
                 pending: HashMap::new(),
             }),
+            max_results: max_results.max(1),
         }
     }
 
@@ -103,7 +113,15 @@ impl UrlDeduplicator {
         if let Some(tx) = inner.pending.remove(url) {
             let _ = tx.send(Some(result.clone()));
         }
+        if !inner.results.contains_key(url) {
+            inner.order.push_back(url.to_string());
+        }
         inner.results.insert(url.to_string(), result);
+        while inner.results.len() > self.max_results {
+            if let Some(oldest) = inner.order.pop_front() {
+                inner.results.remove(&oldest);
+            }
+        }
     }
 
     /// Get a cached result without modifying state.
@@ -141,6 +159,7 @@ mod tests {
             category: StreamCategory::Alive,
             error_reason: None,
             mismatch_warnings: Vec::new(),
+            screenshot_path: None,
         }
     }
 

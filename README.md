@@ -11,6 +11,7 @@ Concurrent IPTV stream validation crate.
 - single-stream validation
 - bulk validation with reports
 - optional deeper media inspection
+- optional screenshot capture when an output directory is configured
 - categorization of alive/dead/problematic streams
 - deduplication and checkpoint helpers
 - URL normalization utilities
@@ -47,6 +48,7 @@ println!("available: {}", result.info.available);
 - deep checks may inherit runtime/tooling assumptions from `crispy-media-probe`
 - network-heavy validation can be expensive; callers should choose concurrency and timeout settings intentionally
 - this crate does not perform persistence or queueing for you
+- status classification still ships with a built-in default policy, even though the public helper layer is now better aligned with customization needs
 
 ## License
 
