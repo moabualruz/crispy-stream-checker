@@ -2,25 +2,27 @@
 
 Concurrent IPTV stream validation crate.
 
-## Status
+## What This Crate Is
 
-Extracted from CrispyTivi. Intended as a reusable Rust crate for batch validation of IPTV stream URLs.
+`crispy-stream-checker` validates IPTV stream URLs at scale with bounded concurrency. It supports simple liveness checks and deeper inspection when used together with `crispy-media-probe`.
 
-## What This Crate Provides
+## What It Provides
 
-- bounded-concurrency stream checking
-- HTTP HEAD / GET fallback validation
-- optional media probing integration
-- batch reports and categorized results
+- single-stream validation
+- bulk validation with reports
+- optional deeper media inspection
+- categorization of alive/dead/problematic streams
 - deduplication and checkpoint helpers
-- URL normalization helpers
+- URL normalization utilities
 
 ## Installation
 
 ```toml
 [dependencies]
-crispy-stream-checker = "0.1"
+crispy-stream-checker = "0.1.1"
 ```
+
+MSRV: Rust `1.85`
 
 ## Quick Start
 
@@ -34,18 +36,18 @@ println!("available: {}", result.info.available);
 # }
 ```
 
-## Relationship To Other Crates
+## Typical Uses
 
-- uses `crispy-iptv-types`
-- can use `crispy-media-probe` for deeper validation/probing
+- provider QA pipelines
+- dead-link detection
+- validating imported playlists before they hit production
 
-## Primary Use Cases
+## Current Limitations
 
-- playlist QA
-- provider validation pipelines
-- dead/alive URL audits
-- automated IPTV catalog checking
+- deep checks may inherit runtime/tooling assumptions from `crispy-media-probe`
+- network-heavy validation can be expensive; callers should choose concurrency and timeout settings intentionally
+- this crate does not perform persistence or queueing for you
 
-## Caveats
+## License
 
-- public release should clearly document network timeouts, probing cost, and runtime dependencies inherited from media probing
+See `LICENSE.md` and `NOTICE.md`.
