@@ -13,8 +13,8 @@ categories = ["multimedia", "network-programming", "command-line-utilities"]
 rust-version = "1.85"
 
 [dependencies]
-crispy-iptv-types = "0.1.2"
-crispy-media-probe = "0.1.2"
+crispy-iptv-types = { version = "0.1.2", git = "https://github.com/moabualruz/crispy-iptv-types", rev = "fa4a9a4f3b090184cda6bd1bf2128494d6200be3" }
+crispy-media-probe = { version = "0.1.2", git = "https://github.com/moabualruz/crispy-media-probe", rev = "1f3e50fb126762d290f5958d5c9cee1f0ff5cbf5" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
