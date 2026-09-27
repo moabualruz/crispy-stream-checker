@@ -41,9 +41,6 @@ jobs:
         env:
           SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}.git
           GITHUB_TOKEN: ${{ github.token }}
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
-          BASE_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
           source="$RUNNER_TEMP/prepared-source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
@@ -59,9 +56,6 @@ jobs:
           cd "$source"
           python3 tests/runner_workflow_contract.py
           cargo generate-lockfile
-          if [[ "$EVENT_NAME" == pull_request && "$HEAD_REPOSITORY" == "$BASE_REPOSITORY" ]]; then
-            cp Cargo.lock "$GITHUB_WORKSPACE/Cargo.lock"
-          fi
           tar -cf - -C "$source" . | gzip -n > "$RUNNER_TEMP/source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz"
       - uses: actions/upload-artifact@v7
         with:
@@ -78,12 +72,10 @@ jobs:
       - name: Isolate this gate's Cargo output
         run: printf 'CARGO_TARGET_DIR=%s/cargo-target-%s-%s-fmt\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v8
-        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository }}
         with:
           name: source-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/artifact-${{ github.run_id }}-${{ github.run_attempt }}-fmt
       - name: Unpack prepared source
-        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository }}
         run: tar -xf "$RUNNER_TEMP/artifact-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-fmt/source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz" -C "$GITHUB_WORKSPACE"
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -98,12 +90,10 @@ jobs:
       - name: Isolate this gate's Cargo output
         run: printf 'CARGO_TARGET_DIR=%s/cargo-target-%s-%s-clippy\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v8
-        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository }}
         with:
           name: source-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/artifact-${{ github.run_id }}-${{ github.run_attempt }}-clippy
       - name: Unpack prepared source
-        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository }}
         run: tar -xf "$RUNNER_TEMP/artifact-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-clippy/source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz" -C "$GITHUB_WORKSPACE"
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -118,12 +108,10 @@ jobs:
       - name: Isolate this gate's Cargo output
         run: printf 'CARGO_TARGET_DIR=%s/cargo-target-%s-%s-test\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v8
-        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository }}
         with:
           name: source-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/artifact-${{ github.run_id }}-${{ github.run_attempt }}-test
       - name: Unpack prepared source
-        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository }}
         run: tar -xf "$RUNNER_TEMP/artifact-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-test/source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz" -C "$GITHUB_WORKSPACE"
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -137,12 +125,10 @@ jobs:
       - name: Isolate this gate's Cargo output
         run: printf 'CARGO_TARGET_DIR=%s/cargo-target-%s-%s-doc\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v8
-        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository }}
         with:
           name: source-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/artifact-${{ github.run_id }}-${{ github.run_attempt }}-doc
       - name: Unpack prepared source
-        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository }}
         run: tar -xf "$RUNNER_TEMP/artifact-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-doc/source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz" -C "$GITHUB_WORKSPACE"
       - uses: dtolnay/rust-toolchain@stable
         with:

@@ -1,4 +1,5 @@
 from pathlib import Path
+import io
 import os
 import re
 import subprocess
@@ -25,14 +26,42 @@ def job_block(workflow, name):
 
 def named_step_script(workflow, job, name):
     lines = job_block(workflow, job).splitlines()
-    name_line = lines.index(f"        name: {name}")
-    run_line = lines.index("        run: |", name_line)
+    name_line = next(
+        index for index, line in enumerate(lines)
+        if line in (f"        name: {name}", f"      - name: {name}")
+    )
+    run_line = next(
+        index for index in range(name_line + 1, len(lines))
+        if lines[index].startswith("        run:")
+    )
+    if lines[run_line] != "        run: |":
+        return lines[run_line].removeprefix("        run: ")
     script = []
     for line in lines[run_line + 1:]:
         if line and not line.startswith("          "):
             break
         script.append(line[10:] if line.startswith("          ") else "")
     return "\n".join(script)
+
+
+def named_step_block(workflow, job, name):
+    lines = job_block(workflow, job).splitlines()
+    start = lines.index(f"      - name: {name}")
+    end = next(
+        (index for index in range(start + 1, len(lines)) if lines[index].startswith("      - ")),
+        len(lines),
+    )
+    return "\n".join(lines[start:end])
+
+
+def action_step_block(workflow, job, action):
+    lines = job_block(workflow, job).splitlines()
+    start = lines.index(f"      - uses: {action}")
+    end = next(
+        (index for index in range(start + 1, len(lines)) if lines[index].startswith("      - ")),
+        len(lines),
+    )
+    return "\n".join(lines[start:end])
 
 
 def archive_command(workflow):
@@ -79,12 +108,9 @@ class RunnerWorkflowContract(unittest.TestCase):
         self.assertLess(prepare_source.index('cd "$source"'), prepare_source.index(contract_check))
         self.assertLess(prepare_source.index(contract_check), prepare_source.index("cargo generate-lockfile"))
         self.assertLess(prepare_source.index('unset GITHUB_TOKEN auth'), prepare_source.index(contract_check))
-        lock_copy = 'cp Cargo.lock "$GITHUB_WORKSPACE/Cargo.lock"'
-        self.assertLess(prepare_source.index("cargo generate-lockfile"), prepare_source.index(lock_copy))
-        self.assertLess(prepare_source.index(lock_copy), prepare_source.index('tar -cf - -C "$source" .'))
+        self.assertLess(prepare_source.index("cargo generate-lockfile"), prepare_source.index('tar -cf - -C "$source" .'))
 
         artifact = "source-${{ github.run_id }}-${{ github.run_attempt }}"
-        fork_or_push = "if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository }}"
         self.assertNotIn("actions/checkout@", prepare)
         for gate in GATES:
             block = job_block(self.workflow, gate)
@@ -93,7 +119,11 @@ class RunnerWorkflowContract(unittest.TestCase):
             self.assertIn("needs.prepare.outputs.runs_on", block, gate)
             self.assertIn(artifact, block, gate)
             self.assertIn(f"cargo-target-%s-%s-{suffix}", block, gate)
-            self.assertEqual(block.count(fork_or_push), 2, gate)
+            download = action_step_block(self.workflow, gate, "actions/download-artifact@v8")
+            self.assertNotIn("if:", download, gate)
+            self.assertIn(f"artifact-${{{{ github.run_id }}}}-${{{{ github.run_attempt }}}}-{suffix}", download, gate)
+            unpack = named_step_block(self.workflow, gate, "Unpack prepared source")
+            self.assertNotIn("if:", unpack, gate)
             self.assertIn('tar -xf "$RUNNER_TEMP/artifact-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-' + suffix + '/source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz" -C "$GITHUB_WORKSPACE"', block, gate)
             self.assertNotIn("working-directory:", block, gate)
             self.assertNotIn("actions/checkout@", block, gate)
@@ -191,9 +221,6 @@ class RunnerWorkflowContract(unittest.TestCase):
                 GITHUB_RUN_ID="42",
                 GITHUB_RUN_ATTEMPT="2",
                 GITHUB_WORKSPACE=workspace,
-                EVENT_NAME="pull_request",
-                HEAD_REPOSITORY="owner/repo",
-                BASE_REPOSITORY="owner/repo",
                 PATH=f"{fake_bin}:{env['PATH']}",
             )
             subprocess.run(
@@ -212,24 +239,43 @@ class RunnerWorkflowContract(unittest.TestCase):
                 }
             self.assertEqual(files["tracked.txt"], b"committed source\n")
             self.assertEqual(files["Cargo.lock"], b"resolved once\n")
-            self.assertEqual(Path(workspace, "Cargo.lock").read_bytes(), b"resolved once\n")
+            self.assertFalse(Path(workspace, "Cargo.lock").exists())
             self.assertNotIn("untracked.txt", files)
 
-            with tempfile.TemporaryDirectory() as fork_runner_temp, tempfile.TemporaryDirectory() as fork_workspace:
-                fork_env = dict(env)
-                fork_env.update(
-                    RUNNER_TEMP=fork_runner_temp,
-                    GITHUB_RUN_ID="43",
-                    GITHUB_WORKSPACE=fork_workspace,
-                    HEAD_REPOSITORY="fork/repo",
+    def test_each_gate_unpacks_prepared_source_into_its_workspace(self):
+        with tempfile.TemporaryDirectory() as runner_temp, tempfile.TemporaryDirectory() as workspace:
+            for gate in GATES:
+                suffix = "test" if gate == "cargo-test" else gate
+                artifact_dir = Path(runner_temp, f"artifact-42-2-{suffix}")
+                artifact_dir.mkdir()
+                archive_path = artifact_dir / "source-42-2.tar.gz"
+                with tarfile.open(archive_path, "w:gz") as archive:
+                    for name, content in (
+                        ("Cargo.toml", f"prepared source for {gate}\n"),
+                        ("Cargo.lock", f"prepared lock for {gate}\n"),
+                    ):
+                        data = content.encode()
+                        member = tarfile.TarInfo(name)
+                        member.size = len(data)
+                        archive.addfile(member, io.BytesIO(data))
+
+                gate_workspace = Path(workspace, gate)
+                gate_workspace.mkdir()
+                Path(gate_workspace, "Cargo.toml").write_text("stale runner workspace\n")
+                env = dict(os.environ)
+                env.update(
+                    RUNNER_TEMP=runner_temp,
+                    GITHUB_RUN_ID="42",
+                    GITHUB_RUN_ATTEMPT="2",
+                    GITHUB_WORKSPACE=str(gate_workspace),
                 )
                 subprocess.run(
-                    ["bash", "-e", "-c", archive_command(self.workflow)],
-                    cwd=repo,
-                    env=fork_env,
+                    ["bash", "-e", "-c", named_step_script(self.workflow, gate, "Unpack prepared source")],
+                    env=env,
                     check=True,
                 )
-                self.assertFalse(Path(fork_workspace, "Cargo.lock").exists())
+                self.assertEqual(Path(gate_workspace, "Cargo.toml").read_text(), f"prepared source for {gate}\n")
+                self.assertEqual(Path(gate_workspace, "Cargo.lock").read_text(), f"prepared lock for {gate}\n")
 
 
 if __name__ == "__main__":
