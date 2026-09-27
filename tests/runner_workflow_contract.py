@@ -64,6 +64,14 @@ def action_step_block(workflow, job, action):
     return "\n".join(lines[start:end])
 
 
+def cargo_step_script(workflow, job):
+    line = next(
+        line for line in job_block(workflow, job).splitlines()
+        if line.startswith('      - run: cd "$PREPARED_SOURCE_DIR" && cargo ')
+    )
+    return line.removeprefix("      - run: ")
+
+
 def archive_command(workflow):
     lines = workflow.splitlines()
     for index, line in enumerate(lines):
@@ -124,7 +132,11 @@ class RunnerWorkflowContract(unittest.TestCase):
             self.assertIn(f"artifact-${{{{ github.run_id }}}}-${{{{ github.run_attempt }}}}-{suffix}", download, gate)
             unpack = named_step_block(self.workflow, gate, "Unpack prepared source")
             self.assertNotIn("if:", unpack, gate)
-            self.assertIn('tar -xf "$RUNNER_TEMP/artifact-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-' + suffix + '/source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz" -C "$GITHUB_WORKSPACE"', block, gate)
+            self.assertIn('source_dir="$(mktemp -d "$RUNNER_TEMP/prepared-source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-' + suffix + '.XXXXXX")"', unpack, gate)
+            self.assertIn('tar -xf "$RUNNER_TEMP/artifact-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-' + suffix + '/source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz" -C "$source_dir"', unpack, gate)
+            self.assertIn("PREPARED_SOURCE_DIR=%s", unpack, gate)
+            self.assertIn('cd "$PREPARED_SOURCE_DIR" && cargo ', cargo_step_script(self.workflow, gate), gate)
+            self.assertNotIn("GITHUB_WORKSPACE", unpack, gate)
             self.assertNotIn("working-directory:", block, gate)
             self.assertNotIn("actions/checkout@", block, gate)
 
@@ -242,8 +254,15 @@ class RunnerWorkflowContract(unittest.TestCase):
             self.assertFalse(Path(workspace, "Cargo.lock").exists())
             self.assertNotIn("untracked.txt", files)
 
-    def test_each_gate_unpacks_prepared_source_into_its_workspace(self):
+    def test_each_gate_uses_fresh_prepared_source_without_stale_runner_files(self):
         with tempfile.TemporaryDirectory() as runner_temp, tempfile.TemporaryDirectory() as workspace:
+            fake_bin = Path(runner_temp, "bin")
+            fake_bin.mkdir()
+            fake_cargo = fake_bin / "cargo"
+            fake_cargo.write_text(
+                '#!/bin/sh\nprintf \'%s\\n\' "$PWD"\ntest ! -e build.rs\ntest ! -e .cargo/config.toml\n'
+            )
+            fake_cargo.chmod(0o755)
             for gate in GATES:
                 suffix = "test" if gate == "cargo-test" else gate
                 artifact_dir = Path(runner_temp, f"artifact-42-2-{suffix}")
@@ -262,20 +281,41 @@ class RunnerWorkflowContract(unittest.TestCase):
                 gate_workspace = Path(workspace, gate)
                 gate_workspace.mkdir()
                 Path(gate_workspace, "Cargo.toml").write_text("stale runner workspace\n")
+                Path(gate_workspace, "build.rs").write_text("panic!(\"stale build script executed\");\n")
+                stale_cargo_config = Path(gate_workspace, ".cargo")
+                stale_cargo_config.mkdir()
+                Path(stale_cargo_config, "config.toml").write_text('[alias]\ncheck = "!false"\n')
+                github_env = Path(runner_temp, f"github-env-{gate}")
                 env = dict(os.environ)
                 env.update(
                     RUNNER_TEMP=runner_temp,
                     GITHUB_RUN_ID="42",
                     GITHUB_RUN_ATTEMPT="2",
                     GITHUB_WORKSPACE=str(gate_workspace),
+                    GITHUB_ENV=str(github_env),
+                    PATH=f"{fake_bin}:{os.environ['PATH']}",
                 )
                 subprocess.run(
                     ["bash", "-e", "-c", named_step_script(self.workflow, gate, "Unpack prepared source")],
                     env=env,
                     check=True,
                 )
-                self.assertEqual(Path(gate_workspace, "Cargo.toml").read_text(), f"prepared source for {gate}\n")
-                self.assertEqual(Path(gate_workspace, "Cargo.lock").read_text(), f"prepared lock for {gate}\n")
+                prepared_dir = Path(github_env.read_text().strip().split("=", 1)[1])
+                self.assertEqual(Path(prepared_dir, "Cargo.toml").read_text(), f"prepared source for {gate}\n")
+                self.assertEqual(Path(prepared_dir, "Cargo.lock").read_text(), f"prepared lock for {gate}\n")
+                self.assertFalse(Path(prepared_dir, "build.rs").exists())
+                self.assertFalse(Path(prepared_dir, ".cargo/config.toml").exists())
+                result = subprocess.run(
+                    ["bash", "-e", "-c", cargo_step_script(self.workflow, gate)],
+                    cwd=gate_workspace,
+                    env={**env, "PREPARED_SOURCE_DIR": str(prepared_dir)},
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.stdout.strip(), str(prepared_dir))
+                self.assertTrue(Path(gate_workspace, "build.rs").exists())
+                self.assertTrue(Path(gate_workspace, ".cargo/config.toml").exists())
 
 
 if __name__ == "__main__":
