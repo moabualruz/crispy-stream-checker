@@ -60,7 +60,7 @@ jobs:
           git -C "$repository" archive --format=tar "$fetched_sha" | tar -xf - -C "$source"
           cd "$source"
           python3 tests/runner_workflow_contract.py
-          cargo --locked metadata --format-version 1 --no-deps > /dev/null
+          cargo --locked metadata --format-version 1 > /dev/null
           tar -cf - -C "$source" . | gzip -n > "$RUNNER_TEMP/source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz"
       - uses: actions/upload-artifact@v7
         with:

@@ -248,21 +248,25 @@ class RunnerWorkflowContract(unittest.TestCase):
             git("branch", "-m", "main")
             Path(repo, "Cargo.toml").write_text('[package]\nname="fixture"\nversion="0.1.0"\nedition="2021"\n')
             Path(repo, "tracked.txt").write_text("committed source\n")
+            Path(repo, "Cargo.lock").write_text("committed lock\n")
             Path(repo, "tests").mkdir()
             Path(repo, "tests/runner_workflow_contract.py").write_text(
                 "import os\nassert 'GITHUB_TOKEN' not in os.environ\n"
             )
-            git("add", "Cargo.toml", "tracked.txt", "tests/runner_workflow_contract.py")
+            git("add", "Cargo.toml", "Cargo.lock", "tracked.txt", "tests/runner_workflow_contract.py")
             git("commit", "-qm", "workflow source")
             workflow_sha = git("rev-parse", "HEAD")
             Path(repo, "tracked.txt").write_text("working tree edit\n")
             Path(repo, "untracked.txt").write_text("must not be archived\n")
 
             fake_cargo = Path(fake_bin, "cargo")
-            fake_cargo.write_text("#!/bin/sh\nprintf 'resolved once\\n' > Cargo.lock\n")
+            cargo_log = Path(runner_temp, "cargo.log")
+            fake_cargo.write_text(f"#!/bin/sh\nprintf '%s|%s\\n' \"$*\" \"${{GITHUB_TOKEN:-}}\" >> {cargo_log}\n")
             fake_cargo.chmod(0o755)
             env = dict(os.environ)
+            git_trace = Path(runner_temp, "git-trace.log")
             env.update(
+                GIT_TRACE=str(git_trace),
                 GITHUB_SHA=workflow_sha,
                 SOURCE_URL=repo,
                 GITHUB_TOKEN="test-token",
@@ -287,7 +291,16 @@ class RunnerWorkflowContract(unittest.TestCase):
                     if member.isfile()
                 }
             self.assertEqual(files["tracked.txt"], b"committed source\n")
-            self.assertEqual(files["Cargo.lock"], b"resolved once\n")
+            self.assertEqual(files["Cargo.lock"], b"committed lock\n")
+            self.assertTrue(cargo_log.read_text().strip())
+            for line in cargo_log.read_text().splitlines():
+                arguments, token = line.rsplit("|", 1)
+                self.assertIn("--locked", arguments)
+                self.assertEqual(token, "", "token leaked into cargo environment")
+            import base64
+            encoded = base64.b64encode(b"x-access-token:test-token").decode()
+            self.assertNotIn("test-token", git_trace.read_text())
+            self.assertNotIn(encoded, git_trace.read_text())
             self.assertFalse(Path(workspace, "Cargo.lock").exists())
             self.assertNotIn("untracked.txt", files)
 

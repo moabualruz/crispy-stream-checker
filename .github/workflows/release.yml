@@ -8,17 +8,23 @@ on:
         required: true
         type: string
 
+permissions:
+  contents: read
+
 jobs:
   release-check:
     runs-on: [self-hosted, linux, x64, generic]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets --all-features -- -D warnings
-      - run: cargo test --all-features
-      - run: cargo package
+      - run: cargo --locked fmt --check
+      - run: cargo --locked clippy --all-targets --all-features -- -D warnings
+      - run: cargo --locked test --all-features
+      # full cargo package is blocked on crispy-media-probe 0.1.2 being published: moabualruz/crispy-stream-checker#3
+      - run: cargo --locked package --list
