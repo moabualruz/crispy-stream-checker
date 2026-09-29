@@ -1,25 +1,195 @@
 name: CI
 
 on:
+  pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('pr-{0}-{1}', github.repository_id, github.event.pull_request.number) || format('ref-{0}-{1}', github.repository_id, github.ref) }}
+  cancel-in-progress: false
+
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  prepare:
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && fromJSON(format('["self-hosted","linux","x64","generic","pr-{0}-{1}"]', github.repository_id, github.event.pull_request.number)) || github.event_name == 'pull_request' && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64","generic"]') }}
+    outputs:
+      runs_on: ${{ steps.route.outputs.runs_on }}
     steps:
-      - uses: actions/checkout@v4
+      - id: route
+        name: Select runner route
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPOSITORY: ${{ github.repository }}
+          REPOSITORY_ID: ${{ github.repository_id }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if [[ "$EVENT_NAME" == pull_request && "$HEAD_REPOSITORY" == "$BASE_REPOSITORY" ]]; then
+            printf 'runs_on=["self-hosted","linux","x64","generic","pr-%s-%s"]\n' "$REPOSITORY_ID" "$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          elif [[ "$EVENT_NAME" == pull_request ]]; then
+            printf 'runs_on="ubuntu-latest"\n' >> "$GITHUB_OUTPUT"
+          else
+            printf 'runs_on=["self-hosted","linux","x64","generic"]\n' >> "$GITHUB_OUTPUT"
+          fi
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: cargo fmt
-        run: cargo fmt --check
-      - name: cargo clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-      - name: cargo test
-        run: cargo test --all-features
-      - name: cargo doc
-        run: cargo doc --no-deps
-      - name: cargo package
-        run: cargo package
+      - name: Prepare pinned source and lockfile
+        shell: bash
+        env:
+          SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}.git
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          source="$RUNNER_TEMP/prepared-source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          repository="$RUNNER_TEMP/source-repository-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -p "$source"
+          git init -q "$repository"
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=http.extraheader
+          export GIT_CONFIG_VALUE_0="$auth"
+          git -C "$repository" fetch --no-tags --depth=1 "$SOURCE_URL" "$GITHUB_SHA"
+          unset GITHUB_TOKEN auth GIT_CONFIG_VALUE_0 GIT_CONFIG_KEY_0 GIT_CONFIG_COUNT
+          fetched_sha="$(git -C "$repository" rev-parse FETCH_HEAD)"
+          test "$fetched_sha" = "$GITHUB_SHA"
+          git -C "$repository" archive --format=tar "$fetched_sha" | tar -xf - -C "$source"
+          cd "$source"
+          python3 tests/runner_workflow_contract.py
+          cargo --locked metadata --format-version 1 > /dev/null
+          tar -cf - -C "$source" . | gzip -n > "$RUNNER_TEMP/source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: source-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/source-${{ github.run_id }}-${{ github.run_attempt }}.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  fmt:
+    needs: prepare
+    runs-on: ${{ fromJSON(needs.prepare.outputs.runs_on) }}
+    steps:
+      - name: Isolate this gate's Cargo output
+        run: printf 'CARGO_TARGET_DIR=%s/cargo-target-%s-%s-fmt\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v8
+        with:
+          name: source-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifact-${{ github.run_id }}-${{ github.run_attempt }}-fmt
+      - name: Unpack prepared source
+        run: |
+          source_dir="$(mktemp -d "$RUNNER_TEMP/prepared-source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-fmt.XXXXXX")"
+          tar -xf "$RUNNER_TEMP/artifact-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-fmt/source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz" -C "$source_dir"
+          printf 'PREPARED_SOURCE_DIR=%s\n' "$source_dir" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt
+      - run: cd "$PREPARED_SOURCE_DIR" && cargo --locked fmt --check
+
+  clippy:
+    needs: prepare
+    runs-on: ${{ fromJSON(needs.prepare.outputs.runs_on) }}
+    steps:
+      - name: Isolate this gate's Cargo output
+        run: printf 'CARGO_TARGET_DIR=%s/cargo-target-%s-%s-clippy\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v8
+        with:
+          name: source-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifact-${{ github.run_id }}-${{ github.run_attempt }}-clippy
+      - name: Unpack prepared source
+        run: |
+          source_dir="$(mktemp -d "$RUNNER_TEMP/prepared-source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-clippy.XXXXXX")"
+          tar -xf "$RUNNER_TEMP/artifact-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-clippy/source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz" -C "$source_dir"
+          printf 'PREPARED_SOURCE_DIR=%s\n' "$source_dir" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: clippy
+      - run: cd "$PREPARED_SOURCE_DIR" && cargo --locked clippy --all-targets --all-features -- -D warnings
+
+  cargo-test:
+    needs: prepare
+    runs-on: ${{ fromJSON(needs.prepare.outputs.runs_on) }}
+    steps:
+      - name: Isolate this gate's Cargo output
+        run: printf 'CARGO_TARGET_DIR=%s/cargo-target-%s-%s-test\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v8
+        with:
+          name: source-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifact-${{ github.run_id }}-${{ github.run_attempt }}-test
+      - name: Unpack prepared source
+        run: |
+          source_dir="$(mktemp -d "$RUNNER_TEMP/prepared-source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-test.XXXXXX")"
+          tar -xf "$RUNNER_TEMP/artifact-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-test/source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz" -C "$source_dir"
+          printf 'PREPARED_SOURCE_DIR=%s\n' "$source_dir" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - run: cd "$PREPARED_SOURCE_DIR" && cargo --locked test --all-features
+
+  doc:
+    needs: prepare
+    runs-on: ${{ fromJSON(needs.prepare.outputs.runs_on) }}
+    steps:
+      - name: Isolate this gate's Cargo output
+        run: printf 'CARGO_TARGET_DIR=%s/cargo-target-%s-%s-doc\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v8
+        with:
+          name: source-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifact-${{ github.run_id }}-${{ github.run_attempt }}-doc
+      - name: Unpack prepared source
+        run: |
+          source_dir="$(mktemp -d "$RUNNER_TEMP/prepared-source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-doc.XXXXXX")"
+          tar -xf "$RUNNER_TEMP/artifact-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-doc/source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz" -C "$source_dir"
+          printf 'PREPARED_SOURCE_DIR=%s\n' "$source_dir" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - run: cd "$PREPARED_SOURCE_DIR" && cargo --locked doc --no-deps
+
+  # The registry dependency is unpublished, so package validation uses --list until release.
+  package:
+    needs: prepare
+    runs-on: ${{ fromJSON(needs.prepare.outputs.runs_on) }}
+    steps:
+      - name: Isolate this gate's Cargo output
+        run: printf 'CARGO_TARGET_DIR=%s/cargo-target-%s-%s-package\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v8
+        with:
+          name: source-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifact-${{ github.run_id }}-${{ github.run_attempt }}-package
+      - name: Unpack prepared source
+        run: |
+          source_dir="$(mktemp -d "$RUNNER_TEMP/prepared-source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-package.XXXXXX")"
+          tar -xf "$RUNNER_TEMP/artifact-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-package/source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz" -C "$source_dir"
+          printf 'PREPARED_SOURCE_DIR=%s\n' "$source_dir" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - run: cd "$PREPARED_SOURCE_DIR" && cargo --locked package --list
+
+  test:
+    if: ${{ always() }}
+    needs: [prepare, fmt, clippy, cargo-test, doc, package]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Preserve required test status
+        env:
+          PREPARE_RESULT: ${{ needs.prepare.result }}
+          FMT_RESULT: ${{ needs.fmt.result }}
+          CLIPPY_RESULT: ${{ needs.clippy.result }}
+          CARGO_TEST_RESULT: ${{ needs.cargo-test.result }}
+          DOC_RESULT: ${{ needs.doc.result }}
+          PACKAGE_RESULT: ${{ needs.package.result }}
+        run: |
+          for result in "$PREPARE_RESULT" "$FMT_RESULT" "$CLIPPY_RESULT" "$CARGO_TEST_RESULT" "$DOC_RESULT" "$PACKAGE_RESULT"; do
+            if [[ "$result" != success ]]; then
+              printf 'Required workflow gate did not succeed: %s\n' "$result" >&2
+              exit 1
+            fi
+          done
