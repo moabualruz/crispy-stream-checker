@@ -10,7 +10,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/ci.yml"
-GATES = ("fmt", "clippy", "cargo-test", "doc")
+GATES = ("fmt", "clippy", "cargo-test", "doc", "package")
+JUSTFILE = ROOT / "justfile"
 
 
 def job_block(workflow, name):
@@ -105,7 +106,7 @@ class RunnerWorkflowContract(unittest.TestCase):
         )
         prepare = job_block(self.workflow, "prepare")
         self.assertNotIn("actions/checkout@", prepare)
-        self.assertIn('git -C "$repository" -c http.extraheader="$auth" fetch --no-tags --depth=1 "$SOURCE_URL" "$GITHUB_SHA"', archive_command(self.workflow))
+        self.assertIn('git -C "$repository" fetch --no-tags --depth=1 "$SOURCE_URL" "$GITHUB_SHA"', archive_command(self.workflow))
         self.assertIn('test "$fetched_sha" = "$GITHUB_SHA"', archive_command(self.workflow))
         self.assertIn('git -C "$repository" archive --format=tar "$fetched_sha"', archive_command(self.workflow))
         prepare_source = archive_command(self.workflow)
@@ -114,9 +115,21 @@ class RunnerWorkflowContract(unittest.TestCase):
         self.assertNotIn("Verify runner workflow contract", prepare)
         self.assertLess(prepare_source.index(source_archive), prepare_source.index(contract_check))
         self.assertLess(prepare_source.index('cd "$source"'), prepare_source.index(contract_check))
-        self.assertLess(prepare_source.index(contract_check), prepare_source.index("cargo generate-lockfile"))
+        self.assertLess(prepare_source.index(contract_check), prepare_source.index("cargo --locked metadata"))
         self.assertLess(prepare_source.index('unset GITHUB_TOKEN auth'), prepare_source.index(contract_check))
-        self.assertLess(prepare_source.index("cargo generate-lockfile"), prepare_source.index('tar -cf - -C "$source" .'))
+        self.assertLess(prepare_source.index("cargo --locked metadata"), prepare_source.index('tar -cf - -C "$source" .'))
+        self.assertIn("export GIT_CONFIG_COUNT=1", prepare_source)
+        self.assertIn("export GIT_CONFIG_KEY_0=http.extraheader", prepare_source)
+        self.assertIn('export GIT_CONFIG_VALUE_0="$auth"', prepare_source)
+        self.assertIn(
+            'git -C "$repository" fetch --no-tags --depth=1 "$SOURCE_URL" "$GITHUB_SHA"',
+            prepare_source,
+        )
+        self.assertNotIn(' -c http.extraheader="$auth"', prepare_source)
+        self.assertIn(
+            "unset GITHUB_TOKEN auth GIT_CONFIG_VALUE_0 GIT_CONFIG_KEY_0 GIT_CONFIG_COUNT",
+            prepare_source,
+        )
 
         artifact = "source-${{ github.run_id }}-${{ github.run_attempt }}"
         self.assertNotIn("actions/checkout@", prepare)
@@ -135,24 +148,49 @@ class RunnerWorkflowContract(unittest.TestCase):
             self.assertIn('source_dir="$(mktemp -d "$RUNNER_TEMP/prepared-source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-' + suffix + '.XXXXXX")"', unpack, gate)
             self.assertIn('tar -xf "$RUNNER_TEMP/artifact-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-' + suffix + '/source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz" -C "$source_dir"', unpack, gate)
             self.assertIn("PREPARED_SOURCE_DIR=%s", unpack, gate)
-            self.assertIn('cd "$PREPARED_SOURCE_DIR" && cargo ', cargo_step_script(self.workflow, gate), gate)
+            cargo_command = cargo_step_script(self.workflow, gate)
+            self.assertIn('cd "$PREPARED_SOURCE_DIR" && cargo --locked ', cargo_command, gate)
             self.assertNotIn("GITHUB_WORKSPACE", unpack, gate)
             self.assertNotIn("working-directory:", block, gate)
             self.assertNotIn("actions/checkout@", block, gate)
 
+        self.assertIn(
+            'cd "$PREPARED_SOURCE_DIR" && cargo --locked package --list',
+            cargo_step_script(self.workflow, "package"),
+        )
         summary = job_block(self.workflow, "test")
         self.assertIn("if: ${{ always() }}", summary)
-        self.assertIn("needs: [prepare, fmt, clippy, cargo-test, doc]", summary)
-        self.assertIn("head.repo.full_name != github.repository && '\"ubuntu-latest\"'", summary)
-        for result in ("PREPARE_RESULT", "FMT_RESULT", "CLIPPY_RESULT", "CARGO_TEST_RESULT", "DOC_RESULT"):
+        self.assertIn("needs: [prepare, fmt, clippy, cargo-test, doc, package]", summary)
+        self.assertIn("runs-on: ubuntu-latest", summary)
+        self.assertNotIn("needs.prepare.outputs.runs_on ||", summary)
+        for result in ("PREPARE_RESULT", "FMT_RESULT", "CLIPPY_RESULT", "CARGO_TEST_RESULT", "DOC_RESULT", "PACKAGE_RESULT"):
             self.assertIn(result, summary)
         self.assertIn('[[ "$result" != success ]]', summary)
-        self.assertIn("cargo package because crispy-media-probe 0.1.2 is not published on crates.io", self.workflow)
+        self.assertNotIn("cargo package because crispy-media-probe 0.1.2 is not published on crates.io", self.workflow)
+        self.assertNotIn("generate-lockfile", self.workflow)
+        self.assertIn("cancel-in-progress: false", self.workflow)
+        self.assertIn("format('pr-{0}-{1}', github.repository_id, github.event.pull_request.number)", self.workflow)
+        self.assertEqual(
+            [line.strip() for line in JUSTFILE.read_text().splitlines() if line.startswith("    ")],
+            [
+                "python3 tests/runner_workflow_contract.py",
+                "cargo --locked fmt --check",
+                "cargo --locked clippy --all-targets --all-features -- -D warnings",
+                "cargo --locked test --all-features",
+                "cargo --locked doc --no-deps",
+                "cargo --locked package --list --allow-dirty",
+            ],
+        )
 
     def test_runner_route_separates_internal_pr_fork_and_push(self):
         route = named_step_script(self.workflow, "prepare", "Select runner route")
+        prepare = job_block(self.workflow, "prepare")
+        runner_expression = next(line for line in prepare.splitlines() if line.startswith("    runs-on:"))
+        self.assertIn('pr-{0}-{1}', runner_expression)
+        self.assertNotIn("github.run_id", runner_expression)
+        self.assertNotIn("github.run_attempt", runner_expression)
         with tempfile.TemporaryDirectory() as temp:
-            def select(event, head, base):
+            def select(event, head, base, run_id="42", run_attempt="2"):
                 output = Path(temp, "github-output")
                 output.unlink(missing_ok=True)
                 env = dict(os.environ)
@@ -162,17 +200,16 @@ class RunnerWorkflowContract(unittest.TestCase):
                     BASE_REPOSITORY=base,
                     REPOSITORY_ID="123",
                     PR_NUMBER="4",
-                    RUN_ID="42",
-                    RUN_ATTEMPT="2",
+                    RUN_ID=run_id,
+                    RUN_ATTEMPT=run_attempt,
                     GITHUB_OUTPUT=str(output),
                 )
                 subprocess.run(["bash", "-e", "-c", route], env=env, check=True)
                 return output.read_text()
 
-            self.assertEqual(
-                select("pull_request", "owner/repo", "owner/repo"),
-                'runs_on=["self-hosted","linux","x64","generic","pr-123-4-run-42-attempt-2"]\n',
-            )
+            expected_pr_route = 'runs_on=["self-hosted","linux","x64","generic","pr-123-4"]\n'
+            self.assertEqual(select("pull_request", "owner/repo", "owner/repo"), expected_pr_route)
+            self.assertEqual(select("pull_request", "owner/repo", "owner/repo", "99", "3"), expected_pr_route)
             self.assertEqual(
                 select("pull_request", "fork/repo", "owner/repo"),
                 'runs_on="ubuntu-latest"\n',

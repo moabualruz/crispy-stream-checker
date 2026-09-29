@@ -9,9 +9,13 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('pr-{0}-{1}', github.repository_id, github.event.pull_request.number) || format('ref-{0}-{1}', github.repository_id, github.ref) }}
+  cancel-in-progress: false
+
 jobs:
   prepare:
-    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && fromJSON(format('["self-hosted","linux","x64","generic","pr-{0}-{1}-run-{2}-attempt-{3}"]', github.repository_id, github.event.pull_request.number, github.run_id, github.run_attempt)) || github.event_name == 'pull_request' && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64","generic"]') }}
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && fromJSON(format('["self-hosted","linux","x64","generic","pr-{0}-{1}"]', github.repository_id, github.event.pull_request.number)) || github.event_name == 'pull_request' && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64","generic"]') }}
     outputs:
       runs_on: ${{ steps.route.outputs.runs_on }}
     steps:
@@ -23,11 +27,9 @@ jobs:
           BASE_REPOSITORY: ${{ github.repository }}
           REPOSITORY_ID: ${{ github.repository_id }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          RUN_ID: ${{ github.run_id }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           if [[ "$EVENT_NAME" == pull_request && "$HEAD_REPOSITORY" == "$BASE_REPOSITORY" ]]; then
-            printf 'runs_on=["self-hosted","linux","x64","generic","pr-%s-%s-run-%s-attempt-%s"]\n' "$REPOSITORY_ID" "$PR_NUMBER" "$RUN_ID" "$RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+            printf 'runs_on=["self-hosted","linux","x64","generic","pr-%s-%s"]\n' "$REPOSITORY_ID" "$PR_NUMBER" >> "$GITHUB_OUTPUT"
           elif [[ "$EVENT_NAME" == pull_request ]]; then
             printf 'runs_on="ubuntu-latest"\n' >> "$GITHUB_OUTPUT"
           else
@@ -48,14 +50,17 @@ jobs:
           mkdir -p "$source"
           git init -q "$repository"
           auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
-          git -C "$repository" -c http.extraheader="$auth" fetch --no-tags --depth=1 "$SOURCE_URL" "$GITHUB_SHA"
-          unset GITHUB_TOKEN auth
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=http.extraheader
+          export GIT_CONFIG_VALUE_0="$auth"
+          git -C "$repository" fetch --no-tags --depth=1 "$SOURCE_URL" "$GITHUB_SHA"
+          unset GITHUB_TOKEN auth GIT_CONFIG_VALUE_0 GIT_CONFIG_KEY_0 GIT_CONFIG_COUNT
           fetched_sha="$(git -C "$repository" rev-parse FETCH_HEAD)"
           test "$fetched_sha" = "$GITHUB_SHA"
           git -C "$repository" archive --format=tar "$fetched_sha" | tar -xf - -C "$source"
           cd "$source"
           python3 tests/runner_workflow_contract.py
-          cargo generate-lockfile
+          cargo --locked metadata --format-version 1 --no-deps > /dev/null
           tar -cf - -C "$source" . | gzip -n > "$RUNNER_TEMP/source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz"
       - uses: actions/upload-artifact@v7
         with:
@@ -84,7 +89,7 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt
-      - run: cd "$PREPARED_SOURCE_DIR" && cargo fmt --check
+      - run: cd "$PREPARED_SOURCE_DIR" && cargo --locked fmt --check
 
   clippy:
     needs: prepare
@@ -105,7 +110,7 @@ jobs:
         with:
           toolchain: stable
           components: clippy
-      - run: cd "$PREPARED_SOURCE_DIR" && cargo clippy --all-targets --all-features -- -D warnings
+      - run: cd "$PREPARED_SOURCE_DIR" && cargo --locked clippy --all-targets --all-features -- -D warnings
 
   cargo-test:
     needs: prepare
@@ -125,7 +130,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
-      - run: cd "$PREPARED_SOURCE_DIR" && cargo test --all-features
+      - run: cd "$PREPARED_SOURCE_DIR" && cargo --locked test --all-features
 
   doc:
     needs: prepare
@@ -145,13 +150,33 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
-      - run: cd "$PREPARED_SOURCE_DIR" && cargo doc --no-deps
+      - run: cd "$PREPARED_SOURCE_DIR" && cargo --locked doc --no-deps
 
-  # Local CI skips cargo package because crispy-media-probe 0.1.2 is not published on crates.io.
+  # The registry dependency is unpublished, so package validation uses --list until release.
+  package:
+    needs: prepare
+    runs-on: ${{ fromJSON(needs.prepare.outputs.runs_on) }}
+    steps:
+      - name: Isolate this gate's Cargo output
+        run: printf 'CARGO_TARGET_DIR=%s/cargo-target-%s-%s-package\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v8
+        with:
+          name: source-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifact-${{ github.run_id }}-${{ github.run_attempt }}-package
+      - name: Unpack prepared source
+        run: |
+          source_dir="$(mktemp -d "$RUNNER_TEMP/prepared-source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-package.XXXXXX")"
+          tar -xf "$RUNNER_TEMP/artifact-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-package/source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz" -C "$source_dir"
+          printf 'PREPARED_SOURCE_DIR=%s\n' "$source_dir" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - run: cd "$PREPARED_SOURCE_DIR" && cargo --locked package --list
+
   test:
     if: ${{ always() }}
-    needs: [prepare, fmt, clippy, cargo-test, doc]
-    runs-on: ${{ fromJSON(needs.prepare.outputs.runs_on || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && '"ubuntu-latest"') || '["self-hosted","linux","x64","generic"]') }}
+    needs: [prepare, fmt, clippy, cargo-test, doc, package]
+    runs-on: ubuntu-latest
     steps:
       - name: Preserve required test status
         env:
@@ -160,8 +185,9 @@ jobs:
           CLIPPY_RESULT: ${{ needs.clippy.result }}
           CARGO_TEST_RESULT: ${{ needs.cargo-test.result }}
           DOC_RESULT: ${{ needs.doc.result }}
+          PACKAGE_RESULT: ${{ needs.package.result }}
         run: |
-          for result in "$PREPARE_RESULT" "$FMT_RESULT" "$CLIPPY_RESULT" "$CARGO_TEST_RESULT" "$DOC_RESULT"; do
+          for result in "$PREPARE_RESULT" "$FMT_RESULT" "$CLIPPY_RESULT" "$CARGO_TEST_RESULT" "$DOC_RESULT" "$PACKAGE_RESULT"; do
             if [[ "$result" != success ]]; then
               printf 'Required workflow gate did not succeed: %s\n' "$result" >&2
               exit 1
