@@ -61,11 +61,12 @@ jobs:
           cd "$source"
           python3 tests/runner_workflow_contract.py
           cargo --locked metadata --format-version 1 > /dev/null
-          tar -cf - -C "$source" . | gzip -n > "$RUNNER_TEMP/source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz"
+          tar -cf - -C "$source" . | gzip -n > "$RUNNER_TEMP/source-$GITHUB_RUN_ID.tar.gz"
       - uses: actions/upload-artifact@v7
         with:
-          name: source-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/source-${{ github.run_id }}-${{ github.run_attempt }}.tar.gz
+          overwrite: true
+          name: source-${{ github.run_id }}
+          path: ${{ runner.temp }}/source-${{ github.run_id }}.tar.gz
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
@@ -78,12 +79,12 @@ jobs:
         run: printf 'CARGO_TARGET_DIR=%s/cargo-target-%s-%s-fmt\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v8
         with:
-          name: source-${{ github.run_id }}-${{ github.run_attempt }}
+          name: source-${{ github.run_id }}
           path: ${{ runner.temp }}/artifact-${{ github.run_id }}-${{ github.run_attempt }}-fmt
       - name: Unpack prepared source
         run: |
           source_dir="$(mktemp -d "$RUNNER_TEMP/prepared-source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-fmt.XXXXXX")"
-          tar -xf "$RUNNER_TEMP/artifact-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-fmt/source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz" -C "$source_dir"
+          tar -xf "$RUNNER_TEMP/artifact-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-fmt/source-$GITHUB_RUN_ID.tar.gz" -C "$source_dir"
           printf 'PREPARED_SOURCE_DIR=%s\n' "$source_dir" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -99,12 +100,12 @@ jobs:
         run: printf 'CARGO_TARGET_DIR=%s/cargo-target-%s-%s-clippy\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v8
         with:
-          name: source-${{ github.run_id }}-${{ github.run_attempt }}
+          name: source-${{ github.run_id }}
           path: ${{ runner.temp }}/artifact-${{ github.run_id }}-${{ github.run_attempt }}-clippy
       - name: Unpack prepared source
         run: |
           source_dir="$(mktemp -d "$RUNNER_TEMP/prepared-source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-clippy.XXXXXX")"
-          tar -xf "$RUNNER_TEMP/artifact-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-clippy/source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz" -C "$source_dir"
+          tar -xf "$RUNNER_TEMP/artifact-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-clippy/source-$GITHUB_RUN_ID.tar.gz" -C "$source_dir"
           printf 'PREPARED_SOURCE_DIR=%s\n' "$source_dir" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -120,12 +121,12 @@ jobs:
         run: printf 'CARGO_TARGET_DIR=%s/cargo-target-%s-%s-test\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v8
         with:
-          name: source-${{ github.run_id }}-${{ github.run_attempt }}
+          name: source-${{ github.run_id }}
           path: ${{ runner.temp }}/artifact-${{ github.run_id }}-${{ github.run_attempt }}-test
       - name: Unpack prepared source
         run: |
           source_dir="$(mktemp -d "$RUNNER_TEMP/prepared-source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-test.XXXXXX")"
-          tar -xf "$RUNNER_TEMP/artifact-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-test/source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz" -C "$source_dir"
+          tar -xf "$RUNNER_TEMP/artifact-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-test/source-$GITHUB_RUN_ID.tar.gz" -C "$source_dir"
           printf 'PREPARED_SOURCE_DIR=%s\n' "$source_dir" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -140,12 +141,12 @@ jobs:
         run: printf 'CARGO_TARGET_DIR=%s/cargo-target-%s-%s-doc\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v8
         with:
-          name: source-${{ github.run_id }}-${{ github.run_attempt }}
+          name: source-${{ github.run_id }}
           path: ${{ runner.temp }}/artifact-${{ github.run_id }}-${{ github.run_attempt }}-doc
       - name: Unpack prepared source
         run: |
           source_dir="$(mktemp -d "$RUNNER_TEMP/prepared-source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-doc.XXXXXX")"
-          tar -xf "$RUNNER_TEMP/artifact-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-doc/source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz" -C "$source_dir"
+          tar -xf "$RUNNER_TEMP/artifact-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-doc/source-$GITHUB_RUN_ID.tar.gz" -C "$source_dir"
           printf 'PREPARED_SOURCE_DIR=%s\n' "$source_dir" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -161,12 +162,12 @@ jobs:
         run: printf 'CARGO_TARGET_DIR=%s/cargo-target-%s-%s-package\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v8
         with:
-          name: source-${{ github.run_id }}-${{ github.run_attempt }}
+          name: source-${{ github.run_id }}
           path: ${{ runner.temp }}/artifact-${{ github.run_id }}-${{ github.run_attempt }}-package
       - name: Unpack prepared source
         run: |
           source_dir="$(mktemp -d "$RUNNER_TEMP/prepared-source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-package.XXXXXX")"
-          tar -xf "$RUNNER_TEMP/artifact-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-package/source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz" -C "$source_dir"
+          tar -xf "$RUNNER_TEMP/artifact-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-package/source-$GITHUB_RUN_ID.tar.gz" -C "$source_dir"
           printf 'PREPARED_SOURCE_DIR=%s\n' "$source_dir" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:

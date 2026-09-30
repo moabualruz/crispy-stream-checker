@@ -99,6 +99,16 @@ class RunnerWorkflowContract(unittest.TestCase):
     def setUpClass(cls):
         cls.workflow = WORKFLOW.read_text()
 
+    def test_artifact_name_survives_rerun_of_failed_jobs(self):
+        for line in self.workflow.splitlines():
+            if re.match(r"\s+name: .*github\.run_attempt", line):
+                self.fail(f"artifact name embeds run_attempt: {line.strip()}")
+        self.assertNotIn("source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz", self.workflow)
+        self.assertEqual(
+            self.workflow.count("overwrite: true"),
+            self.workflow.count("actions/upload-artifact@"),
+        )
+
     def test_parallel_gates_share_one_prepared_source_and_isolate_writes(self):
         self.assertEqual(
             re.findall(r"(?m)^  ([a-z][a-z0-9_-]*):$", self.workflow.split("jobs:\n", 1)[1]),
@@ -131,7 +141,7 @@ class RunnerWorkflowContract(unittest.TestCase):
             prepare_source,
         )
 
-        artifact = "source-${{ github.run_id }}-${{ github.run_attempt }}"
+        artifact = "source-${{ github.run_id }}"
         self.assertNotIn("actions/checkout@", prepare)
         for gate in GATES:
             block = job_block(self.workflow, gate)
@@ -146,7 +156,7 @@ class RunnerWorkflowContract(unittest.TestCase):
             unpack = named_step_block(self.workflow, gate, "Unpack prepared source")
             self.assertNotIn("if:", unpack, gate)
             self.assertIn('source_dir="$(mktemp -d "$RUNNER_TEMP/prepared-source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-' + suffix + '.XXXXXX")"', unpack, gate)
-            self.assertIn('tar -xf "$RUNNER_TEMP/artifact-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-' + suffix + '/source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz" -C "$source_dir"', unpack, gate)
+            self.assertIn('tar -xf "$RUNNER_TEMP/artifact-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-' + suffix + '/source-$GITHUB_RUN_ID.tar.gz" -C "$source_dir"', unpack, gate)
             self.assertIn("PREPARED_SOURCE_DIR=%s", unpack, gate)
             cargo_command = cargo_step_script(self.workflow, gate)
             self.assertIn('cd "$PREPARED_SOURCE_DIR" && cargo --locked ', cargo_command, gate)
@@ -283,7 +293,7 @@ class RunnerWorkflowContract(unittest.TestCase):
                 check=True,
             )
 
-            source_archive = Path(runner_temp, "source-42-2.tar.gz")
+            source_archive = Path(runner_temp, "source-42.tar.gz")
             with tarfile.open(source_archive, "r:gz") as archive:
                 files = {
                     member.name.removeprefix("./"): archive.extractfile(member).read()
@@ -317,7 +327,7 @@ class RunnerWorkflowContract(unittest.TestCase):
                 suffix = "test" if gate == "cargo-test" else gate
                 artifact_dir = Path(runner_temp, f"artifact-42-2-{suffix}")
                 artifact_dir.mkdir()
-                archive_path = artifact_dir / "source-42-2.tar.gz"
+                archive_path = artifact_dir / "source-42.tar.gz"
                 with tarfile.open(archive_path, "w:gz") as archive:
                     for name, content in (
                         ("Cargo.toml", f"prepared source for {gate}\n"),
