@@ -369,7 +369,7 @@ async fn capture_screenshot_if_enabled(
 
 /// Check multiple streams concurrently with bounded concurrency.
 ///
-/// Uses a [`Semaphore`] to limit the number of simultaneous connections
+/// Uses a [`JoinSet`] to limit the number of simultaneous connections
 /// to `opts.max_concurrent`. Results are collected as they complete.
 pub async fn check_bulk(urls: &[String], opts: &CheckOptions) -> BulkCheckReport {
     check_bulk_with_progress(urls, opts, |_, _, _| {}).await

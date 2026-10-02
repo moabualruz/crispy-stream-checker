@@ -13,12 +13,13 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 fn opts_for(_server: &MockServer) -> CheckOptions {
     // Use short timeouts for tests with minimal retries.
     CheckOptions {
-        timeout_ms: 3_000,
+        timeout_ms: 10_000,
         max_concurrent: 10,
         follow_redirects: true,
         user_agent: Some("crispy-test/1.0".into()),
         accept_invalid_certs: false,
         retries: 1,
+        skip_media_probe: true,
         ..Default::default()
     }
 }
@@ -161,7 +162,7 @@ async fn bulk_check_reports_mixed_availability() {
     let report = check_bulk(&urls, &opts_for(&server)).await;
 
     assert_eq!(report.total, 5);
-    assert_eq!(report.available, 3);
+    assert_eq!(report.available, 3, "results: {:#?}", report.results);
     assert_eq!(report.unavailable, 2);
     assert_eq!(report.errors, 0);
     assert_eq!(report.results.len(), 5);

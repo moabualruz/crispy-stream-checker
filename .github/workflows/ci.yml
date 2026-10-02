@@ -6,23 +6,166 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('pr-{0}-{1}', github.repository_id, github.event.pull_request.number) || format('ref-{0}-{1}', github.repository_id, github.ref) }}
+  cancel-in-progress: false
+
 jobs:
-  test:
-    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || fromJSON('["self-hosted", "linux", "x64", "generic"]') }}
+  prepare:
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && fromJSON(format('["self-hosted","linux","x64","generic","pr-{0}-{1}"]', github.repository_id, github.event.pull_request.number)) || github.event_name == 'pull_request' && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64","generic"]') }}
+    outputs:
+      runs_on: ${{ steps.route.outputs.runs_on }}
     steps:
+      - id: route
+        name: Select trusted runner route
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPOSITORY: ${{ github.repository }}
+          REPOSITORY_ID: ${{ github.repository_id }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if [[ "$EVENT_NAME" == pull_request && "$HEAD_REPOSITORY" == "$BASE_REPOSITORY" ]]; then
+            printf 'runs_on=["self-hosted","linux","x64","generic","pr-%s-%s"]\n' "$REPOSITORY_ID" "$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          elif [[ "$EVENT_NAME" == pull_request ]]; then
+            printf 'runs_on="ubuntu-latest"\n' >> "$GITHUB_OUTPUT"
+          else
+            printf 'runs_on=["self-hosted","linux","x64","generic"]\n' >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/checkout@v4
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository }}
+        with:
+          persist-credentials: false
+      - name: Verify host-prepared PR checkout
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          test "$GITHUB_EVENT_NAME" = pull_request
+          test "$(git rev-parse --show-toplevel)" = "$(cd "$GITHUB_WORKSPACE" && pwd -P)"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - uses: dtolnay/rust-toolchain@stable
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+        with:
+          toolchain: stable
+      - name: Prepare shared lockfile
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+        run: cargo generate-lockfile
+      - name: Create source archive
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository }}
+        run: git archive --format=tar "$GITHUB_SHA" | gzip -n > "$RUNNER_TEMP/source.tar.gz"
+      - uses: actions/upload-artifact@v7
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository }}
+        with:
+          name: source-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/source.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  fmt:
+    needs: prepare
+    runs-on: ${{ fromJSON(needs.prepare.outputs.runs_on) }}
+    steps:
+      - name: Isolate this gate build output
+        run: printf 'CARGO_TARGET_DIR=%s/cargo-target-%s-%s-fmt\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+      - name: Download prepared source
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository }}
+        uses: actions/download-artifact@v8
+        with:
+          name: source-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/source
+      - name: Unpack prepared source
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository }}
+        run: tar -xf "$RUNNER_TEMP/source/source.tar.gz" -C "$GITHUB_WORKSPACE"
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: cargo fmt
-        run: cargo fmt --check
-      - name: cargo clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-      - name: cargo test
-        run: cargo test --all-features
-      - name: cargo doc
-        run: cargo doc --no-deps
-      - name: cargo package
-        run: cargo package
+          components: rustfmt
+      - run: cargo fmt --check
+
+  clippy:
+    needs: prepare
+    runs-on: ${{ fromJSON(needs.prepare.outputs.runs_on) }}
+    steps:
+      - name: Isolate this gate build output
+        run: printf 'CARGO_TARGET_DIR=%s/cargo-target-%s-%s-clippy\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+      - name: Download prepared source
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository }}
+        uses: actions/download-artifact@v8
+        with:
+          name: source-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/source
+      - name: Unpack prepared source
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository }}
+        run: tar -xf "$RUNNER_TEMP/source/source.tar.gz" -C "$GITHUB_WORKSPACE"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: clippy
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+
+  cargo-test:
+    needs: prepare
+    runs-on: ${{ fromJSON(needs.prepare.outputs.runs_on) }}
+    steps:
+      - name: Isolate this gate build output
+        run: printf 'CARGO_TARGET_DIR=%s/cargo-target-%s-%s-test\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+      - name: Download prepared source
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository }}
+        uses: actions/download-artifact@v8
+        with:
+          name: source-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/source
+      - name: Unpack prepared source
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository }}
+        run: tar -xf "$RUNNER_TEMP/source/source.tar.gz" -C "$GITHUB_WORKSPACE"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - run: cargo test --all-features
+      - run: bash tests/runner-contract.test.sh
+
+  doc:
+    needs: prepare
+    runs-on: ${{ fromJSON(needs.prepare.outputs.runs_on) }}
+    steps:
+      - name: Isolate this gate build output
+        run: printf 'CARGO_TARGET_DIR=%s/cargo-target-%s-%s-doc\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+      - name: Download prepared source
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository }}
+        uses: actions/download-artifact@v8
+        with:
+          name: source-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/source
+      - name: Unpack prepared source
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository }}
+        run: tar -xf "$RUNNER_TEMP/source/source.tar.gz" -C "$GITHUB_WORKSPACE"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - run: cargo doc --no-deps
+
+  test:
+    if: ${{ !cancelled() }}
+    needs: [prepare, fmt, clippy, cargo-test, doc]
+    runs-on: ${{ fromJSON(needs.prepare.outputs.runs_on || '["self-hosted","linux","x64","generic"]') }}
+    steps:
+      - name: Preserve required test status
+        env:
+          PREPARE_RESULT: ${{ needs.prepare.result }}
+          FMT_RESULT: ${{ needs.fmt.result }}
+          CLIPPY_RESULT: ${{ needs.clippy.result }}
+          CARGO_TEST_RESULT: ${{ needs.cargo-test.result }}
+          DOC_RESULT: ${{ needs.doc.result }}
+        run: |
+          for result in "$PREPARE_RESULT" "$FMT_RESULT" "$CLIPPY_RESULT" "$CARGO_TEST_RESULT" "$DOC_RESULT"; do
+            if [[ "$result" != success ]]; then
+              printf 'Required workflow gate did not succeed: %s\n' "$result" >&2
+              exit 1
+            fi
+          done
